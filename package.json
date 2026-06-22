@@ -1,0 +1,47 @@
+{
+  "name": "llm-queue",
+  "version": "0.1.0",
+  "description": "Single-worker priority queue + JSON classify() helper for a local LLM (Ollama / llama.cpp), with pluggable browser and Node transports.",
+  "type": "module",
+  "license": "UNLICENSED",
+  "exports": {
+    "./core": {
+      "types": "./dist/core.d.ts",
+      "import": "./dist/core.js"
+    },
+    "./browser": {
+      "types": "./dist/browser.d.ts",
+      "import": "./dist/browser.js"
+    },
+    "./node": {
+      "types": "./dist/node.d.ts",
+      "import": "./dist/node.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "jsonrepair": "^3.13.1"
+  },
+  "peerDependencies": {
+    "ollama": "^0.6.3"
+  },
+  "peerDependenciesMeta": {
+    "ollama": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "ollama": "^0.6.3",
+    "tsup": "^8.5.0",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}
