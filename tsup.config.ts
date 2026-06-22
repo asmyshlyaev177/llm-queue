@@ -1,7 +1,14 @@
 import { defineConfig } from 'tsup'
 
 export default defineConfig({
-  entry: ['src/core.ts', 'src/browser.ts', 'src/node.ts'],
+  entry: [
+    'src/core.ts',
+    'src/browser.ts',
+    'src/client.ts',
+    'src/server.ts',
+    'src/node.ts',
+    'src/cli.ts',
+  ],
   format: ['esm'],
   dts: true,
   clean: true,

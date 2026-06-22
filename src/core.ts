@@ -128,6 +128,15 @@ export function createLlmQueue(transport: ChatTransport, options: QueueOptions =
    * object to your typed result. Returns `null` on a non-fatal failure (network,
    * timeout, unparseable output); throws only on fatal model errors.
    */
+  /**
+   * Serialized raw chat: one model request at a time, with timeout + retry.
+   * `priority` jumps the queue ahead of normal items. Returns the model's raw
+   * string output (no parsing). The service (./server) exposes this over HTTP.
+   */
+  function chat(systemPrompt: string, userContent: string, priority = false): Promise<string> {
+    return enqueue(() => chatWithRetry(systemPrompt, userContent), priority)
+  }
+
   async function classify<T>(
     name: string,
     systemPrompt: string,
@@ -137,7 +146,7 @@ export function createLlmQueue(transport: ChatTransport, options: QueueOptions =
   ): Promise<T | null> {
     const truncated = truncate(systemPrompt, userContent)
     try {
-      const raw = await enqueue(() => chatWithRetry(systemPrompt, truncated), priority)
+      const raw = await chat(systemPrompt, truncated, priority)
       log(`[llm] ${name} → ${raw}`, 'debug')
       const parsed = JSON.parse(jsonrepair(raw)) as Record<string, unknown>
       return parse(parsed)
@@ -149,7 +158,7 @@ export function createLlmQueue(transport: ChatTransport, options: QueueOptions =
     }
   }
 
-  return { classify, enqueue }
+  return { classify, chat, enqueue }
 }
 
 export type LlmQueue = ReturnType<typeof createLlmQueue>

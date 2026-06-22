@@ -1,9 +1,12 @@
 {
   "name": "llm-queue",
-  "version": "0.1.0",
-  "description": "Single-worker priority queue + JSON classify() helper for a local LLM (Ollama / llama.cpp), with pluggable browser and Node transports.",
+  "version": "0.2.0",
+  "description": "Single-worker priority queue + JSON classify() helper for a local LLM (Ollama / llama.cpp), with browser/Node/service transports and an optional shared HTTP service.",
   "type": "module",
   "license": "UNLICENSED",
+  "bin": {
+    "llm-queue": "./dist/cli.js"
+  },
   "exports": {
     "./core": {
       "types": "./dist/core.d.ts",
@@ -12,6 +15,14 @@
     "./browser": {
       "types": "./dist/browser.d.ts",
       "import": "./dist/browser.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "import": "./dist/client.js"
+    },
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "import": "./dist/server.js"
     },
     "./node": {
       "types": "./dist/node.d.ts",
@@ -24,6 +35,7 @@
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
+    "serve": "node dist/cli.js serve",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
@@ -39,6 +51,7 @@
     }
   },
   "devDependencies": {
+    "@types/node": "^22.10.0",
     "ollama": "^0.6.3",
     "tsup": "^8.5.0",
     "typescript": "^5.9.2",
