@@ -19,11 +19,12 @@ export interface FetchTransportConfig {
 export function createFetchTransport(config: FetchTransportConfig): ChatTransport {
   const backend = config.backend ?? 'ollama'
   return {
-    async chat(systemPrompt: string, userContent: string): Promise<string> {
+    async chat(systemPrompt: string, userContent: string, numCtx?: number): Promise<string> {
       const messages = [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userContent },
       ]
+      const effectiveNumCtx = numCtx ?? config.numCtx
 
       if (backend === 'llamacpp') {
         const res = await fetch(`${config.url}/v1/chat/completions`, {
@@ -49,7 +50,7 @@ export function createFetchTransport(config: FetchTransportConfig): ChatTranspor
           model: config.model,
           format: 'json',
           stream: false,
-          options: config.numCtx ? { num_ctx: config.numCtx } : undefined,
+          options: effectiveNumCtx ? { num_ctx: effectiveNumCtx } : undefined,
           messages,
         }),
       })

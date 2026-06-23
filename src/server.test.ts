@@ -9,17 +9,19 @@ function trackingTransport() {
   let active = 0
   let maxActive = 0
   const seen: string[] = []
+  const numCtxSeen: Array<number | undefined> = []
   const transport: ChatTransport = {
-    async chat(_sys, user) {
+    async chat(_sys, user, numCtx) {
       active++
       maxActive = Math.max(maxActive, active)
       await new Promise((r) => setTimeout(r, 10))
       active--
       seen.push(user)
+      numCtxSeen.push(numCtx)
       return `echo:${user}`
     },
   }
-  return { transport, get maxActive() { return maxActive }, seen }
+  return { transport, get maxActive() { return maxActive }, seen, numCtxSeen }
 }
 
 let close: (() => Promise<void>) | null = null
@@ -58,6 +60,19 @@ describe('llm-queue service', () => {
     const url = await start(transport)
     const res = await fetch(`${url}/health`)
     expect(res.headers.get('access-control-allow-origin')).toBe('*')
+  })
+
+  it('runs at the high-water max numCtx and never drops below it', async () => {
+    const t = trackingTransport()
+    const url = await start(t.transport)
+    const small = createServiceTransport({ url, numCtx: 8192 })
+    const large = createServiceTransport({ url, numCtx: 16384 })
+
+    await small.chat('s', 'a') // 8192
+    await large.chat('s', 'b') // raises to 16384
+    await small.chat('s', 'c') // still 16384 — never drops back
+
+    expect(t.numCtxSeen).toEqual([8192, 16384, 16384])
   })
 
   it('returns a JSON error (not a crash) when the transport throws', async () => {

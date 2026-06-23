@@ -32,7 +32,10 @@ async function main(): Promise<void> {
     logger: (m, lvl) => (lvl === 'error' ? console.error('[llm-queue]', m) : console.log('[llm-queue]', m)),
   })
   await listen()
-  console.log(`llm-queue service on http://${host}:${port}  →  ${backend} ${model} @ ${url}`)
+  console.log(
+    `llm-queue service on http://${host}:${port}  →  ${backend} ${model} @ ${url}\n` +
+      `  num_ctx floor ${numCtx} (auto-raises to the largest a client requests; never drops back)`,
+  )
 }
 
 void main()

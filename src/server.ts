@@ -11,6 +11,8 @@ interface ChatBody {
   system?: string
   user?: string
   priority?: boolean
+  /** Context window this client wants; the service runs at the max seen. */
+  numCtx?: number
 }
 
 /**
@@ -26,6 +28,20 @@ interface ChatBody {
 export function createLlmServer(opts: LlmServerOptions) {
   const { transport, port = 11500, host = '127.0.0.1', ...queueOpts } = opts
   const queue = createLlmQueue(transport, queueOpts)
+  const log = queueOpts.logger ?? (() => {})
+
+  // The model reloads in Ollama whenever num_ctx changes, so different clients
+  // disagreeing on context size would thrash the runner. We run at the HIGH-WATER
+  // max instead: once a client asks for a larger window we keep it there and
+  // never drop back, so the model loads up at most once and then stays put.
+  let effectiveNumCtx = queueOpts.numCtx ?? 0
+  function negotiateNumCtx(requested?: number): number {
+    if (typeof requested === 'number' && requested > effectiveNumCtx) {
+      log(`raising shared num_ctx ${effectiveNumCtx} → ${requested}`, 'info')
+      effectiveNumCtx = requested
+    }
+    return effectiveNumCtx
+  }
 
   // Allow any origin so browser-context clients (an MV3 service worker, a
   // vitest/jsdom test) can read responses — same role as Ollama's OLLAMA_ORIGINS.
@@ -59,7 +75,12 @@ export function createLlmServer(opts: LlmServerOptions) {
           return
         }
         queue
-          .chat(parsed.system ?? '', parsed.user ?? '', parsed.priority ?? false)
+          .chat(
+            parsed.system ?? '',
+            parsed.user ?? '',
+            parsed.priority ?? false,
+            negotiateNumCtx(parsed.numCtx) || undefined,
+          )
           .then((content) => {
             res.writeHead(200, { ...CORS, 'content-type': 'application/json' })
             res.end(JSON.stringify({ content }))

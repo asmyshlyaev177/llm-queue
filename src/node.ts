@@ -15,11 +15,12 @@ export interface OllamaTransportConfig {
 export function createOllamaTransport(config: OllamaTransportConfig): ChatTransport {
   const ollama = new Ollama({ host: config.url })
   return {
-    async chat(systemPrompt: string, userContent: string): Promise<string> {
+    async chat(systemPrompt: string, userContent: string, numCtx?: number): Promise<string> {
+      const effectiveNumCtx = numCtx ?? config.numCtx
       const response = await ollama.chat({
         model: config.model,
         format: 'json',
-        options: config.numCtx ? { num_ctx: config.numCtx } : undefined,
+        options: effectiveNumCtx ? { num_ctx: effectiveNumCtx } : undefined,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userContent },

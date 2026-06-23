@@ -5,6 +5,13 @@ export interface ServiceTransportConfig {
   url: string
   /** Send requests as priority (jump the shared queue). */
   priority?: boolean
+  /**
+   * Context window this client needs (tokens). Sent with every request; the
+   * service runs the model at the MAX numCtx any client asks for and never drops
+   * below it, so clients that disagree on context size don't make the model
+   * reload. Omit to accept whatever the service is already running.
+   */
+  numCtx?: number
 }
 
 /**
@@ -15,7 +22,7 @@ export interface ServiceTransportConfig {
  */
 export function createServiceTransport(config: ServiceTransportConfig): ChatTransport {
   return {
-    async chat(systemPrompt: string, userContent: string): Promise<string> {
+    async chat(systemPrompt: string, userContent: string, numCtx?: number): Promise<string> {
       const res = await fetch(`${config.url.replace(/\/$/, '')}/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -23,6 +30,7 @@ export function createServiceTransport(config: ServiceTransportConfig): ChatTran
           system: systemPrompt,
           user: userContent,
           priority: config.priority ?? false,
+          numCtx: numCtx ?? config.numCtx,
         }),
       })
       if (!res.ok) {

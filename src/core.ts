@@ -3,9 +3,13 @@ import { jsonrepair } from 'jsonrepair'
 /**
  * A chat transport hits the model once and returns the raw text response.
  * Implementations live in ./browser (fetch) and ./node (ollama pkg).
+ *
+ * `numCtx` optionally overrides the transport's configured context window for
+ * this one call. The service uses it to keep every client on a single shared
+ * context size (the high-water max) so the local model never reloads.
  */
 export interface ChatTransport {
-  chat(systemPrompt: string, userContent: string): Promise<string>
+  chat(systemPrompt: string, userContent: string, numCtx?: number): Promise<string>
 }
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
@@ -89,7 +93,11 @@ export function createLlmQueue(transport: ChatTransport, options: QueueOptions =
     }
   }
 
-  async function chatWithRetry(systemPrompt: string, userContent: string): Promise<string> {
+  async function chatWithRetry(
+    systemPrompt: string,
+    userContent: string,
+    numCtx?: number,
+  ): Promise<string> {
     for (let attempt = 1; attempt <= opts.maxAttempts; attempt++) {
       let timer: ReturnType<typeof setTimeout>
       const timeout = new Promise<never>((_, reject) => {
@@ -99,7 +107,7 @@ export function createLlmQueue(transport: ChatTransport, options: QueueOptions =
         )
       })
       try {
-        return await Promise.race([transport.chat(systemPrompt, userContent), timeout])
+        return await Promise.race([transport.chat(systemPrompt, userContent, numCtx), timeout])
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         if (FATAL_MODEL_RE.test(msg)) throw err
@@ -115,9 +123,9 @@ export function createLlmQueue(transport: ChatTransport, options: QueueOptions =
     throw new Error('unreachable')
   }
 
-  function truncate(systemPrompt: string, userContent: string): string {
+  function truncate(systemPrompt: string, userContent: string, numCtx = opts.numCtx): string {
     const sysTokens = Math.ceil(systemPrompt.length / CHARS_PER_TOKEN)
-    const budget = opts.numCtx - sysTokens - RESPONSE_TOKEN_BUDGET
+    const budget = numCtx - sysTokens - RESPONSE_TOKEN_BUDGET
     const ctxCap = Math.max(0, budget * CHARS_PER_TOKEN)
     const cap = Math.min(opts.maxChars, ctxCap)
     return userContent.length > cap ? userContent.slice(0, cap) : userContent
@@ -133,8 +141,13 @@ export function createLlmQueue(transport: ChatTransport, options: QueueOptions =
    * `priority` jumps the queue ahead of normal items. Returns the model's raw
    * string output (no parsing). The service (./server) exposes this over HTTP.
    */
-  function chat(systemPrompt: string, userContent: string, priority = false): Promise<string> {
-    return enqueue(() => chatWithRetry(systemPrompt, userContent), priority)
+  function chat(
+    systemPrompt: string,
+    userContent: string,
+    priority = false,
+    numCtx?: number,
+  ): Promise<string> {
+    return enqueue(() => chatWithRetry(systemPrompt, userContent, numCtx), priority)
   }
 
   async function classify<T>(
@@ -143,10 +156,11 @@ export function createLlmQueue(transport: ChatTransport, options: QueueOptions =
     userContent: string,
     parse: (parsed: Record<string, unknown>) => T,
     priority = false,
+    numCtx?: number,
   ): Promise<T | null> {
-    const truncated = truncate(systemPrompt, userContent)
+    const truncated = truncate(systemPrompt, userContent, numCtx)
     try {
-      const raw = await chat(systemPrompt, truncated, priority)
+      const raw = await chat(systemPrompt, truncated, priority, numCtx)
       log(`[llm] ${name} → ${raw}`, 'debug')
       const parsed = JSON.parse(jsonrepair(raw)) as Record<string, unknown>
       return parse(parsed)
