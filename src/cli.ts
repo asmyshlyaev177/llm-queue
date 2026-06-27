@@ -18,7 +18,7 @@ async function main(): Promise<void> {
   const url =
     process.env.OLLAMA_URL ??
     (backend === 'llamacpp' ? 'http://localhost:8080' : 'http://localhost:11434')
-  const model = process.env.OLLAMA_MODEL ?? 'granite4.1:30b'
+  const model = process.env.OLLAMA_MODEL ?? 'granite4.1:8b'
   const numCtx = Number(process.env.OLLAMA_NUM_CTX ?? 8192)
   const port = Number(process.env.PORT ?? 11500)
   const host = process.env.HOST ?? '127.0.0.1'
@@ -28,6 +28,7 @@ async function main(): Promise<void> {
     transport,
     port,
     host,
+    model,
     numCtx,
     logger: (m, lvl) => (lvl === 'error' ? console.error('[llm-queue]', m) : console.log('[llm-queue]', m)),
   })

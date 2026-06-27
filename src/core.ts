@@ -1,5 +1,40 @@
 import { jsonrepair } from 'jsonrepair'
 
+export type ChatRole = 'system' | 'user' | 'assistant'
+
+export interface ChatMessage {
+  role: ChatRole
+  content: string
+}
+
+/** OpenAI-style sampling parameters, forwarded to the backend. */
+export interface SamplingParams {
+  temperature?: number
+  top_p?: number
+  /** OpenAI name; mapped to Ollama's `num_predict`. */
+  max_tokens?: number
+  frequency_penalty?: number
+  presence_penalty?: number
+  stop?: string | string[]
+  seed?: number
+}
+
+/** Per-call knobs shared by the transports. */
+export interface ChatOptions {
+  /** Override the context window for this one call (the service's high-water max). */
+  numCtx?: number
+  /**
+   * Constrain output to JSON (Ollama `format`, llama.cpp `response_format`). The
+   * classify path sets this; general OpenAI-style chat does not, unless the
+   * client asks for `response_format: { type: 'json_object' }`.
+   */
+  json?: boolean
+  /** Override the backend model for this call (default: the transport's model). */
+  model?: string
+  /** Sampling parameters (temperature, max_tokens, …) forwarded to the backend. */
+  params?: SamplingParams
+}
+
 /**
  * A chat transport hits the model once and returns the raw text response.
  * Implementations live in ./browser (fetch) and ./node (ollama pkg).
@@ -10,6 +45,12 @@ import { jsonrepair } from 'jsonrepair'
  */
 export interface ChatTransport {
   chat(systemPrompt: string, userContent: string, numCtx?: number): Promise<string>
+  /**
+   * Native multi-message path for OpenAI-style requests. Optional: when a
+   * transport doesn't implement it, the queue collapses the messages back into
+   * the `chat(system, user)` signature (see {@link collapseMessages}).
+   */
+  chatRaw?(messages: ChatMessage[], opts?: ChatOptions): Promise<string>
 }
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
@@ -45,6 +86,46 @@ interface QueueItem {
   resolve: (v: string) => void
   reject: (e: unknown) => void
   priority: boolean
+}
+
+/**
+ * Collapse a messages array into the `(system, user)` pair the base transport
+ * takes — the fallback when a transport has no native `chatRaw`. System messages
+ * join into the system prompt; the remaining turns render as a simple transcript
+ * (lossless for the common single-user-turn case).
+ */
+export function collapseMessages(messages: ChatMessage[]): { system: string; user: string } {
+  const system = messages
+    .filter((m) => m.role === 'system')
+    .map((m) => m.content)
+    .join('\n\n')
+  const rest = messages.filter((m) => m.role !== 'system')
+  const user =
+    rest.length <= 1
+      ? (rest[0]?.content ?? '')
+      : rest.map((m) => `${m.role}: ${m.content}`).join('\n\n')
+  return { system, user }
+}
+
+/**
+ * Map generic sampling params (+ num_ctx) to an Ollama `options` object, used by
+ * both the fetch and SDK transports. Returns undefined when nothing is set, so
+ * callers can omit `options` entirely. `max_tokens` becomes Ollama's `num_predict`.
+ */
+export function toOllamaOptions(
+  numCtx?: number,
+  params?: SamplingParams,
+): Record<string, unknown> | undefined {
+  const o: Record<string, unknown> = {}
+  if (numCtx) o.num_ctx = numCtx
+  if (params?.temperature != null) o.temperature = params.temperature
+  if (params?.top_p != null) o.top_p = params.top_p
+  if (params?.max_tokens != null) o.num_predict = params.max_tokens
+  if (params?.frequency_penalty != null) o.frequency_penalty = params.frequency_penalty
+  if (params?.presence_penalty != null) o.presence_penalty = params.presence_penalty
+  if (params?.stop != null) o.stop = params.stop
+  if (params?.seed != null) o.seed = params.seed
+  return Object.keys(o).length ? o : undefined
 }
 
 /**
@@ -93,11 +174,10 @@ export function createLlmQueue(transport: ChatTransport, options: QueueOptions =
     }
   }
 
-  async function chatWithRetry(
-    systemPrompt: string,
-    userContent: string,
-    numCtx?: number,
-  ): Promise<string> {
+  // Run one model call with a per-attempt timeout + retry. `call` performs the
+  // single underlying request, so the retry/timeout policy is independent of
+  // whether the input was (system, user) or a full messages array.
+  async function withRetry(call: () => Promise<string>): Promise<string> {
     for (let attempt = 1; attempt <= opts.maxAttempts; attempt++) {
       let timer: ReturnType<typeof setTimeout>
       const timeout = new Promise<never>((_, reject) => {
@@ -107,7 +187,7 @@ export function createLlmQueue(transport: ChatTransport, options: QueueOptions =
         )
       })
       try {
-        return await Promise.race([transport.chat(systemPrompt, userContent, numCtx), timeout])
+        return await Promise.race([call(), timeout])
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         if (FATAL_MODEL_RE.test(msg)) throw err
@@ -132,11 +212,6 @@ export function createLlmQueue(transport: ChatTransport, options: QueueOptions =
   }
 
   /**
-   * Run one classification through the queue. `parse` maps the repaired JSON
-   * object to your typed result. Returns `null` on a non-fatal failure (network,
-   * timeout, unparseable output); throws only on fatal model errors.
-   */
-  /**
    * Serialized raw chat: one model request at a time, with timeout + retry.
    * `priority` jumps the queue ahead of normal items. Returns the model's raw
    * string output (no parsing). The service (./server) exposes this over HTTP.
@@ -147,9 +222,33 @@ export function createLlmQueue(transport: ChatTransport, options: QueueOptions =
     priority = false,
     numCtx?: number,
   ): Promise<string> {
-    return enqueue(() => chatWithRetry(systemPrompt, userContent, numCtx), priority)
+    return enqueue(() => withRetry(() => transport.chat(systemPrompt, userContent, numCtx)), priority)
   }
 
+  /**
+   * Serialized chat over a full OpenAI-style messages array. Uses the transport's
+   * native `chatRaw` when available, else collapses the messages through `chat`.
+   * Same single-worker queue as `chat` — the OpenAI endpoint funnels through here.
+   */
+  function chatMessages(
+    messages: ChatMessage[],
+    priority = false,
+    chatOpts: ChatOptions = {},
+  ): Promise<string> {
+    const run = transport.chatRaw
+      ? () => transport.chatRaw!(messages, chatOpts)
+      : () => {
+          const { system, user } = collapseMessages(messages)
+          return transport.chat(system, user, chatOpts.numCtx)
+        }
+    return enqueue(() => withRetry(run), priority)
+  }
+
+  /**
+   * Run one classification through the queue. `parse` maps the repaired JSON
+   * object to your typed result. Returns `null` on a non-fatal failure (network,
+   * timeout, unparseable output); throws only on fatal model errors.
+   */
   async function classify<T>(
     name: string,
     systemPrompt: string,
@@ -160,7 +259,16 @@ export function createLlmQueue(transport: ChatTransport, options: QueueOptions =
   ): Promise<T | null> {
     const truncated = truncate(systemPrompt, userContent, numCtx)
     try {
-      const raw = await chat(systemPrompt, truncated, priority, numCtx)
+      // classify parses the output as JSON, so it asks the backend for JSON mode
+      // explicitly (the library no longer forces JSON on every call).
+      const raw = await chatMessages(
+        [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: truncated },
+        ],
+        priority,
+        { numCtx, json: true },
+      )
       log(`[llm] ${name} → ${raw}`, 'debug')
       const parsed = JSON.parse(jsonrepair(raw)) as Record<string, unknown>
       return parse(parsed)
@@ -172,7 +280,7 @@ export function createLlmQueue(transport: ChatTransport, options: QueueOptions =
     }
   }
 
-  return { classify, chat, enqueue }
+  return { classify, chat, chatMessages, enqueue }
 }
 
 export type LlmQueue = ReturnType<typeof createLlmQueue>

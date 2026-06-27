@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { boolField, createLlmQueue, type ChatTransport } from './core.js'
+import { boolField, createLlmQueue, toOllamaOptions, type ChatTransport } from './core.js'
 
 function transportOf(fn: (sys: string, user: string) => Promise<string> | string): ChatTransport {
   return { chat: async (sys, user) => fn(sys, user) }
@@ -86,5 +86,21 @@ describe('createLlmQueue.classify', () => {
     const out = await classify('t', 's', 'u', (p) => p)
     expect(out).toEqual({ ok: true })
     expect(fn).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('toOllamaOptions', () => {
+  it('maps sampling params (+ num_ctx); max_tokens → num_predict', () => {
+    expect(toOllamaOptions(8192, { temperature: 0.2, max_tokens: 100, seed: 7 })).toEqual({
+      num_ctx: 8192,
+      temperature: 0.2,
+      num_predict: 100,
+      seed: 7,
+    })
+  })
+
+  it('returns undefined when nothing is set', () => {
+    expect(toOllamaOptions()).toBeUndefined()
+    expect(toOllamaOptions(0, {})).toBeUndefined()
   })
 })
