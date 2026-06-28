@@ -179,7 +179,7 @@ pnpm build                   # tsup → dist (ESM + d.ts)
 ```
 
 Commits follow [Conventional Commits](https://www.conventionalcommits.org/)
-(`feat:`, `fix:`, …) — release-please uses them to version, generate the
+(`feat:`, `fix:`, `chore:` etc …) — release-please uses them to version, generate the
 changelog, and publish to npm on merge to `master`.
 
 ## License
