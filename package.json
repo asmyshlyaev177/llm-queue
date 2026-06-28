@@ -1,6 +1,6 @@
 {
   "name": "llm-queue",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Single-worker priority queue for a local LLM (Ollama), exposed as an OpenAI-compatible HTTP service so multiple processes share one serialized queue against one model.",
   "type": "module",
   "license": "MIT",
