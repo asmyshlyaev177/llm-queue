@@ -4,6 +4,7 @@
   "description": "Single-worker priority queue for a local LLM (Ollama), exposed as an OpenAI-compatible HTTP service so multiple processes share one serialized queue against one model.",
   "type": "module",
   "license": "MIT",
+  "packageManager": "pnpm@10.26.0",
   "author": "asmyshlyaev177 <asmyshlyaev177@gmail.com>",
   "homepage": "https://github.com/asmyshlyaev177/llm-queue",
   "repository": {
