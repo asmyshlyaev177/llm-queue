@@ -13,20 +13,13 @@ export interface LlmServerOptions extends QueueOptions {
   host?: string
   /** Model name reported by GET /v1/models and echoed back in completions. */
   model?: string
-}
-
-interface ChatBody {
-  system?: string
-  user?: string
-  priority?: boolean
-  /** Context window this client wants; the service runs at the max seen. */
+  /**
+   * Starting context window (tokens). The service runs at the HIGH-WATER max any
+   * client requests and never drops back, so the model loads at most once; this
+   * is the floor it negotiates up from. Not a queue concern — the queue moves
+   * raw strings — so it lives here, not in QueueOptions.
+   */
   numCtx?: number
-  /** Ask the backend to constrain output to JSON. Off by default. */
-  json?: boolean
-  /** Override the model for this call (default: the service's configured model). */
-  model?: string
-  /** Sampling params (temperature, max_tokens, …) forwarded to the backend. */
-  params?: SamplingParams
 }
 
 interface CompletionsBody extends SamplingParams {
@@ -34,6 +27,14 @@ interface CompletionsBody extends SamplingParams {
   messages?: Array<{ role?: string; content?: unknown }>
   stream?: boolean
   response_format?: { type?: string }
+  /**
+   * llm-queue extension fields. Stock OpenAI clients omit them (and any OpenAI
+   * server ignores them); ours read them straight off the body — the queue's
+   * priority and the shared context window have no OpenAI-standard equivalent.
+   */
+  priority?: boolean
+  /** Context window this client wants; the service runs at the max seen. */
+  numCtx?: number
 }
 
 /**
@@ -41,16 +42,25 @@ interface CompletionsBody extends SamplingParams {
  * all clients funnel through a single serialized queue, so the local model is
  * never hit concurrently no matter how many processes connect.
  *
- *   POST /chat                {system, user, priority?, numCtx?, json?} -> {content} | {error}
- *   POST /v1/chat/completions {model, messages, stream?, response_format?}  (OpenAI-compatible)
+ *   POST /v1/chat/completions {model, messages, stream?, response_format?,
+ *                              priority?, numCtx?}  (OpenAI-compatible + extensions)
  *   GET  /v1/models           -> OpenAI model list
  *   GET  /health              -> "ok"
  *
- * Zero deps (node:http). Pair with createServiceTransport (./client) on clients,
- * or point any OpenAI client at `<url>/v1`.
+ * `priority` and `numCtx` are llm-queue body extensions (see CompletionsBody);
+ * stock OpenAI clients omit them and any OpenAI server ignores them. Zero deps
+ * (node:http). Clients are plain HTTP — point any OpenAI client at `<url>/v1`, or
+ * POST the shape above directly (see the README).
  */
 export function createLlmServer(opts: LlmServerOptions) {
-  const { transport, port = 11500, host = '127.0.0.1', model: modelName = 'local', ...queueOpts } = opts
+  const {
+    transport,
+    port = 11500,
+    host = '127.0.0.1',
+    model: modelName = 'local',
+    numCtx = 0,
+    ...queueOpts
+  } = opts
   const queue = createLlmQueue(transport, queueOpts)
   const log = queueOpts.logger ?? (() => {})
 
@@ -58,7 +68,7 @@ export function createLlmServer(opts: LlmServerOptions) {
   // disagreeing on context size would thrash the runner. We run at the HIGH-WATER
   // max instead: once a client asks for a larger window we keep it there and
   // never drop back, so the model loads up at most once and then stays put.
-  let effectiveNumCtx = queueOpts.numCtx ?? 0
+  let effectiveNumCtx = numCtx
   function negotiateNumCtx(requested?: number): number {
     if (typeof requested === 'number' && requested > effectiveNumCtx) {
       log(`raising shared num_ctx ${effectiveNumCtx} → ${requested}`, 'info')
@@ -74,7 +84,7 @@ export function createLlmServer(opts: LlmServerOptions) {
   const CORS = {
     'access-control-allow-origin': '*',
     'access-control-allow-methods': 'POST, GET, OPTIONS',
-    'access-control-allow-headers': 'content-type, authorization, x-llmq-priority, x-llmq-num-ctx',
+    'access-control-allow-headers': 'content-type, authorization',
   }
 
   const sendJson = (res: http.ServerResponse, status: number, body: unknown): void => {
@@ -111,36 +121,6 @@ export function createLlmServer(opts: LlmServerOptions) {
       return
     }
 
-    // Native {system, user} API. JSON mode is now opt-in (`json: true`).
-    if (req.method === 'POST' && req.url === '/chat') {
-      let parsed: ChatBody
-      try {
-        parsed = JSON.parse(await readBody(req)) as ChatBody
-      } catch {
-        sendJson(res, 400, { error: 'invalid JSON body' })
-        return
-      }
-      try {
-        const content = await queue.chatMessages(
-          [
-            { role: 'system', content: parsed.system ?? '' },
-            { role: 'user', content: parsed.user ?? '' },
-          ],
-          parsed.priority ?? false,
-          {
-            numCtx: negotiateNumCtx(parsed.numCtx) || undefined,
-            json: parsed.json ?? false,
-            model: parsed.model,
-            params: parsed.params,
-          },
-        )
-        sendJson(res, 200, { content })
-      } catch (err) {
-        sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) })
-      }
-      return
-    }
-
     // OpenAI-compatible chat completions. Funnels through the same single queue.
     if (req.method === 'POST' && (req.url === '/v1/chat/completions' || req.url === '/chat/completions')) {
       let body: CompletionsBody
@@ -163,12 +143,11 @@ export function createLlmServer(opts: LlmServerOptions) {
         return
       }
 
-      // Standard OpenAI clients can't express the queue's priority/num_ctx, so
-      // accept them as optional non-standard headers (ignored by normal clients).
+      // Standard OpenAI clients can't express the queue's priority/numCtx, so we
+      // read them as extension body fields (ignored by stock OpenAI servers).
       const wantJson = body.response_format?.type === 'json_object'
-      const priority = req.headers['x-llmq-priority'] === '1' || req.headers['x-llmq-priority'] === 'true'
-      const hdrNumCtx = Number(req.headers['x-llmq-num-ctx'])
-      const numCtx = negotiateNumCtx(Number.isFinite(hdrNumCtx) ? hdrNumCtx : undefined) || undefined
+      const priority = body.priority === true
+      const numCtx = negotiateNumCtx(typeof body.numCtx === 'number' ? body.numCtx : undefined) || undefined
       // Respect the requested model; fall back to the service's configured one.
       const requestedModel = typeof body.model === 'string' && body.model.trim() ? body.model : undefined
       const model = requestedModel ?? modelName // echoed back to the client
@@ -182,33 +161,12 @@ export function createLlmServer(opts: LlmServerOptions) {
         seed: body.seed,
       }
 
-      let content: string
-      try {
-        content = await queue.chatMessages(messages, priority, {
-          numCtx,
-          json: wantJson,
-          model: requestedModel,
-          params,
-        })
-      } catch (err) {
-        sendJson(res, 500, {
-          error: { message: err instanceof Error ? err.message : String(err), type: 'internal_error' },
-        })
-        return
-      }
-
       const id = `chatcmpl-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
       const created = Math.floor(Date.now() / 1000)
-      const promptChars = messages.reduce((n, m) => n + m.content.length, 0)
-      const usage = {
-        prompt_tokens: Math.ceil(promptChars / 4),
-        completion_tokens: Math.ceil(content.length / 4),
-        total_tokens: Math.ceil((promptChars + content.length) / 4),
-      }
+      const chatOpts = { numCtx, json: wantJson, model: requestedModel, params }
 
-      // The queue resolves the whole completion at once, so streaming is emulated:
-      // emit the full content as a single delta. Protocol-compatible with every
-      // OpenAI client (which is what matters); not true token-by-token streaming.
+      // Streaming: relay the queue's token deltas as OpenAI SSE chunks. The queue
+      // still serializes — the stream holds the single worker until it completes.
       if (body.stream) {
         res.writeHead(200, {
           ...CORS,
@@ -221,13 +179,39 @@ export function createLlmServer(opts: LlmServerOptions) {
           res.write(`data: ${JSON.stringify({ ...base, choices })}\n\n`)
         }
         send([{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }])
-        send([{ index: 0, delta: { content }, finish_reason: null }])
+        try {
+          for await (const piece of queue.chatMessagesStream(messages, priority, chatOpts)) {
+            send([{ index: 0, delta: { content: piece }, finish_reason: null }])
+          }
+        } catch (err) {
+          // Headers are already sent, so we can't switch to a 500. Log and close
+          // the SSE cleanly — the client treats [DONE] as end-of-stream and keeps
+          // whatever partial content already arrived.
+          log(`stream error: ${err instanceof Error ? err.message : String(err)}`, 'error')
+        }
         send([{ index: 0, delta: {}, finish_reason: 'stop' }])
         res.write('data: [DONE]\n\n')
         res.end()
         return
       }
 
+      // Non-streaming: one whole completion.
+      let content: string
+      try {
+        content = await queue.chatMessages(messages, priority, chatOpts)
+      } catch (err) {
+        sendJson(res, 500, {
+          error: { message: err instanceof Error ? err.message : String(err), type: 'internal_error' },
+        })
+        return
+      }
+
+      const promptChars = messages.reduce((n, m) => n + m.content.length, 0)
+      const usage = {
+        prompt_tokens: Math.ceil(promptChars / 4),
+        completion_tokens: Math.ceil(content.length / 4),
+        total_tokens: Math.ceil((promptChars + content.length) / 4),
+      }
       sendJson(res, 200, {
         id,
         object: 'chat.completion',

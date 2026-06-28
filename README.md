@@ -1,8 +1,8 @@
 # llm-queue
 
-A single-worker priority queue + JSON `classify()` helper for a **local LLM**
-(Ollama / llama.cpp), plus an optional **OpenAI-compatible HTTP service** so
-multiple processes share one serialized queue against one model.
+A single-worker priority queue for a **local LLM** (Ollama), exposed as an
+**OpenAI-compatible HTTP service** so multiple processes share one serialized
+queue against one model.
 
 ## Why a service?
 
@@ -14,7 +14,7 @@ it over HTTP.
 
 ```text
 process A  ─┐
-process B  ─┼─ HTTP ─▶  llm-queue serve  ──fetch──▶  Ollama / llama.cpp
+process B  ─┼─ HTTP ─▶  llm-queue serve  ──fetch──▶  Ollama
 OpenAI SDK ─┘          (one queue, CORS)            (one model at a time)
 ```
 
@@ -22,7 +22,8 @@ OpenAI SDK ─┘          (one queue, CORS)            (one model at a time)
 
 ```bash
 OLLAMA_MODEL=granite4.1:8b llm-queue serve     # → http://127.0.0.1:11500
-# env: OLLAMA_URL, OLLAMA_MODEL, LLM_BACKEND (ollama|llamacpp), OLLAMA_NUM_CTX, PORT, HOST
+# env: OLLAMA_URL (point at any Ollama host), OLLAMA_MODEL, OLLAMA_NUM_CTX,
+#      LLM_MAX_ATTEMPTS (attempts incl. first; 1 = no retry), LLM_TIMEOUT_MS, PORT, HOST
 ```
 
 The service owns the Ollama endpoint + model and sends permissive CORS headers
@@ -33,13 +34,14 @@ Endpoints:
 
 | Method | Path | Body / notes |
 |---|---|---|
-| `POST` | `/chat` | `{system, user, priority?, numCtx?, json?}` → `{content}` — the native API |
-| `POST` | `/v1/chat/completions` | OpenAI-compatible (`messages`, `stream`, `response_format`) |
-| `GET`  | `/v1/models` | OpenAI model list (single model) |
-| `GET`  | `/health` | → `ok` |
+| `POST` | `/v1/chat/completions` | OpenAI-compatible (`messages`, `stream`, `response_format`) + `priority?` / `numCtx?` extension fields |
+| `GET` | `/v1/models` | OpenAI model list (single model) |
+| `GET` | `/health` | → `ok` |
 
-Output is plain text by default; pass `json: true` (native) or
-`response_format: { type: 'json_object' }` (OpenAI) to constrain to JSON.
+One endpoint: standard OpenAI `/v1/chat/completions`, plus two body fields the
+queue needs that OpenAI has no slot for (`priority`, `numCtx`). Output is plain
+text by default; pass `response_format: { type: 'json_object' }` to constrain it
+to JSON.
 
 ## OpenAI-compatible
 
@@ -64,71 +66,87 @@ const r = await client.chat.completions.create({
 - **Sampling params** — `temperature`, `top_p`, `max_tokens` (→ Ollama
   `num_predict`), `frequency_penalty`, `presence_penalty`, `stop`, and `seed` are
   forwarded to the backend.
-- **Streaming** — `stream: true` is supported, emitted as a single delta (the
-  queue resolves whole responses — protocol-compatible, not token-by-token).
-- **Priority / num_ctx** — standard clients can't express these, so they're
-  accepted as optional `x-llmq-priority` / `x-llmq-num-ctx` request headers.
+- **Streaming** — `stream: true` streams real token-by-token SSE deltas straight
+  from the model. The stream still goes through the one queue (it holds the single
+  worker until it finishes, so requests never overlap). Omit it / `stream: false`
+  for a whole-response JSON completion (what JSON-parsing clients want).
+- **Priority / num_ctx** — standard clients can't express these, so they ride as
+  optional `priority` (boolean) / `numCtx` (number) fields on the request body.
+  Stock OpenAI servers ignore unknown body fields; ours read them.
 
 ## Use from a client
 
-```ts
-import { createLlmQueue } from 'llm-queue/core'
-import { createServiceTransport } from 'llm-queue/client'
+Clients are plain HTTP — no SDK or package needed. A browser service worker, a
+cron job, and a benchmark all share the one queue just by POSTing to it:
 
-const queue = createLlmQueue(createServiceTransport({ url: 'http://localhost:11500' }))
-const out = await queue.classify('isRemote', SYSTEM_PROMPT, userText, (p) => ({
-  isRemote: p.isRemote === true,
-}))
+```ts
+const res = await fetch('http://localhost:11500/v1/chat/completions', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    messages: [
+      { role: 'system', content: SYSTEM_PROMPT },
+      { role: 'user', content: userText },
+    ],
+    response_format: { type: 'json_object' }, // optional: constrain to JSON
+    numCtx: 8192,                             // optional llm-queue extension
+    stream: false,                            // whole completion (the default)
+  }),
+})
+const { choices } = await res.json()
+const out = choices[0].message.content
 ```
 
-`classify()` truncates to the context window, repairs malformed JSON
-(`jsonrepair`), retries with a timeout, and maps the parsed object via your
-builder. Returns `null` on a non-fatal failure; throws only on fatal model errors.
+The queue serializes every client through the one model with a per-attempt
+timeout and retry, and returns the model's raw string — JSON parsing, truncation,
+and validation are the caller's job (this keeps it a queue, not a framework).
 
 ## Priority — two clients, one queue
 
-When several clients share the queue, `priority` lets a latency-sensitive one
-jump ahead of a background one's backlog. A priority request slots in front of
-any *waiting* normal requests — but never preempts the one already running.
+When several clients share the queue, the `priority` body field lets a
+latency-sensitive one jump ahead of a background one's backlog. A priority
+request slots in front of any *waiting* normal requests — but never preempts the
+one already running.
 
 ```ts
-import { createLlmQueue } from 'llm-queue/core'
-import { createServiceTransport } from 'llm-queue/client'
-
-const url = 'http://localhost:11500'
+const url = 'http://localhost:11500/v1/chat/completions'
+const post = (body: object) =>
+  fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
 
 // Client A — a background batch job. Normal priority; fills the queue.
-const batch = createLlmQueue(createServiceTransport({ url }))
-for (const row of rows) void batch.chat(SYSTEM, row.text) // hundreds queued
+for (const row of rows) void post({ messages: [{ role: 'user', content: row.text }] }) // hundreds queued
 
 // Client B — serves a user action. priority: true jumps A's backlog.
-const interactive = createLlmQueue(createServiceTransport({ url, priority: true }))
-const answer = await interactive.chat(SYSTEM, userQuestion) // runs next
+const res = await post({
+  messages: [{ role: 'user', content: userQuestion }],
+  priority: true, // llm-queue extension; runs next, before A's remaining backlog
+})
 ```
 
 Both processes funnel through the single `llm-queue serve` queue, so B's request
-runs as soon as A's in-flight call finishes — ahead of A's remaining backlog.
-
-An OpenAI client can't put `priority` in the body, so it sends the
-`x-llmq-priority: 1` header instead (`createServiceTransport`'s `priority` does
-this for you):
+runs as soon as A's in-flight call finishes — ahead of A's remaining backlog. The
+OpenAI SDK forwards the same field (stock OpenAI servers ignore unknown keys):
 
 ```ts
-await client.chat.completions.create(
-  { model: 'granite4.1:8b', messages: [{ role: 'user', content: userQuestion }] },
-  { headers: { 'x-llmq-priority': '1' } },
-)
+await client.chat.completions.create({
+  model: 'granite4.1:8b',
+  messages: [{ role: 'user', content: userQuestion }],
+  // @ts-expect-error llm-queue extension; the SDK forwards it, OpenAI servers ignore it
+  priority: true,
+})
 ```
 
 ## Exports
 
 | Subpath | What | Where |
 |---|---|---|
-| `llm-queue/core` | `createLlmQueue` (queue + `chat` + `classify`), `boolField` | anywhere |
-| `llm-queue/client` | `createServiceTransport` (HTTP → service) | browser / SW / node |
+| `llm-queue/core` | `createLlmQueue` (serialized queue: `chat`, `chatMessages`, `chatMessagesStream`) | anywhere |
+| `llm-queue/browser` | `createFetchTransport` (direct Ollama HTTP) | service internals |
 | `llm-queue/server` | `createLlmServer` (the HTTP service) | node |
-| `llm-queue/browser` | `createFetchTransport` (direct Ollama/llama.cpp HTTP) | service internals, benches |
-| `llm-queue/node` | `createOllamaTransport` (the `ollama` SDK) | optional |
+
+Most consumers don't import the package at all — they just POST to the running
+`llm-queue serve` over HTTP (see [Use from a client](#use-from-a-client)). The
+subpaths above are the building blocks the CLI itself is made of.
 
 ## Develop
 

@@ -1,5 +1,3 @@
-import { jsonrepair } from 'jsonrepair'
-
 export type ChatRole = 'system' | 'user' | 'assistant'
 
 export interface ChatMessage {
@@ -24,9 +22,8 @@ export interface ChatOptions {
   /** Override the context window for this one call (the service's high-water max). */
   numCtx?: number
   /**
-   * Constrain output to JSON (Ollama `format`, llama.cpp `response_format`). The
-   * classify path sets this; general OpenAI-style chat does not, unless the
-   * client asks for `response_format: { type: 'json_object' }`.
+   * Constrain output to JSON (Ollama `format`). Off unless the client asks for it
+   * (the OpenAI endpoint maps `response_format: { type: 'json_object' }` to this).
    */
   json?: boolean
   /** Override the backend model for this call (default: the transport's model). */
@@ -51,33 +48,30 @@ export interface ChatTransport {
    * the `chat(system, user)` signature (see {@link collapseMessages}).
    */
   chatRaw?(messages: ChatMessage[], opts?: ChatOptions): Promise<string>
+  /**
+   * Token-by-token streaming path: yields content deltas as the model produces
+   * them. Optional — when absent, the queue's stream method falls back to a
+   * single chunk (the whole `chatRaw`/`chat` response). The async iterator must
+   * run to completion (or throw) so the queue can release its single worker.
+   */
+  chatStream?(messages: ChatMessage[], opts?: ChatOptions): AsyncIterable<string>
 }
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 export type Logger = (msg: string, level?: LogLevel) => void
 
 export interface QueueOptions {
-  /** Model context window in tokens, used to size input truncation. */
-  numCtx?: number
-  /** Hard cap on user-content chars regardless of context budget. */
-  maxChars?: number
-  /** Per-attempt timeout. */
+  /** Per-attempt timeout (ms). */
   timeoutMs?: number
-  /** Attempts per classify call (incl. the first). */
+  /** Attempts per request, including the first (so `1` = no retry). */
   maxAttempts?: number
   logger?: Logger
 }
 
 const DEFAULTS = {
-  numCtx: 8192,
-  maxChars: 8000,
   timeoutMs: 60000,
   maxAttempts: 2,
 } satisfies Required<Omit<QueueOptions, 'logger'>>
-
-// Rough token estimate; 4 chars/token is conservative for English/code mixes.
-const CHARS_PER_TOKEN = 4
-const RESPONSE_TOKEN_BUDGET = 256
 
 const FATAL_MODEL_RE = /unable to load model|model not found|no such file|pull model/i
 
@@ -129,12 +123,58 @@ export function toOllamaOptions(
 }
 
 /**
- * Build a serialized (concurrency-1) priority queue around one transport, plus a
- * `classify()` helper that truncates input to the context window, retries with a
- * timeout, repairs malformed JSON, and maps it to a typed result.
- *
- * One instance == one logical model. Hits are never concurrent; `priority` items
+ * A minimal async channel: the producer calls `push`/`close`, the consumer
+ * `for await`s `iterable`. No backpressure — pushes buffer until consumed, which
+ * is fine for relaying a model's token stream (bounded by the response size).
+ * `close(err)` makes the iterable throw `err` after draining buffered values.
+ */
+function createAsyncChannel<T>() {
+  const buffer: T[] = []
+  const waiters: Array<(r: IteratorResult<T>) => void> = []
+  let closed = false
+  let failure: unknown
+
+  return {
+    push(value: T): void {
+      if (closed) return
+      const waiter = waiters.shift()
+      if (waiter) waiter({ value, done: false })
+      else buffer.push(value)
+    },
+    close(err?: unknown): void {
+      if (closed) return
+      closed = true
+      failure = err
+      while (waiters.length) waiters.shift()!({ value: undefined as never, done: true })
+    },
+    iterable: (async function* (): AsyncGenerator<T> {
+      while (true) {
+        if (buffer.length) {
+          yield buffer.shift()!
+          continue
+        }
+        if (closed) {
+          if (failure) throw failure
+          return
+        }
+        const next = await new Promise<IteratorResult<T>>((resolve) => waiters.push(resolve))
+        if (next.done) {
+          if (failure) throw failure
+          return
+        }
+        yield next.value
+      }
+    })(),
+  }
+}
+
+/**
+ * Build a serialized (concurrency-1) priority queue around one transport. Every
+ * call runs one at a time with a per-attempt timeout + retry; `priority` items
  * jump ahead of queued normal items but never preempt the running request.
+ *
+ * One instance == one logical model. The queue moves raw strings — JSON parsing,
+ * truncation, and result mapping are the caller's concern (see the consumers).
  */
 export function createLlmQueue(transport: ChatTransport, options: QueueOptions = {}) {
   const opts = { ...DEFAULTS, ...options }
@@ -203,14 +243,6 @@ export function createLlmQueue(transport: ChatTransport, options: QueueOptions =
     throw new Error('unreachable')
   }
 
-  function truncate(systemPrompt: string, userContent: string, numCtx = opts.numCtx): string {
-    const sysTokens = Math.ceil(systemPrompt.length / CHARS_PER_TOKEN)
-    const budget = numCtx - sysTokens - RESPONSE_TOKEN_BUDGET
-    const ctxCap = Math.max(0, budget * CHARS_PER_TOKEN)
-    const cap = Math.min(opts.maxChars, ctxCap)
-    return userContent.length > cap ? userContent.slice(0, cap) : userContent
-  }
-
   /**
    * Serialized raw chat: one model request at a time, with timeout + retry.
    * `priority` jumps the queue ahead of normal items. Returns the model's raw
@@ -245,47 +277,40 @@ export function createLlmQueue(transport: ChatTransport, options: QueueOptions =
   }
 
   /**
-   * Run one classification through the queue. `parse` maps the repaired JSON
-   * object to your typed result. Returns `null` on a non-fatal failure (network,
-   * timeout, unparseable output); throws only on fatal model errors.
+   * Streaming variant of {@link chatMessages}: yields content deltas as the model
+   * produces them, still serialized through the single worker — the queue slot is
+   * held for the whole stream, so other items wait. Falls back to a single chunk
+   * (the entire response) when the transport has no `chatStream`. No retry: a
+   * stream can't be resumed mid-flight, so a failure surfaces to the consumer.
    */
-  async function classify<T>(
-    name: string,
-    systemPrompt: string,
-    userContent: string,
-    parse: (parsed: Record<string, unknown>) => T,
+  function chatMessagesStream(
+    messages: ChatMessage[],
     priority = false,
-    numCtx?: number,
-  ): Promise<T | null> {
-    const truncated = truncate(systemPrompt, userContent, numCtx)
-    try {
-      // classify parses the output as JSON, so it asks the backend for JSON mode
-      // explicitly (the library no longer forces JSON on every call).
-      const raw = await chatMessages(
-        [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: truncated },
-        ],
-        priority,
-        { numCtx, json: true },
-      )
-      log(`[llm] ${name} → ${raw}`, 'debug')
-      const parsed = JSON.parse(jsonrepair(raw)) as Record<string, unknown>
-      return parse(parsed)
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      if (FATAL_MODEL_RE.test(msg)) throw new Error(`[llm] Fatal: ${msg}`, { cause: err })
-      log(`[llm] ${name} failed (${msg})`, 'error')
-      return null
+    chatOpts: ChatOptions = {},
+  ): AsyncIterable<string> {
+    if (!transport.chatStream) {
+      // No streaming transport — emit the whole (serialized) response as one chunk.
+      return (async function* () {
+        const whole = await chatMessages(messages, priority, chatOpts)
+        if (whole) yield whole
+      })()
     }
+    const channel = createAsyncChannel<string>()
+    // Hold the worker for the full stream; push deltas to the channel as they land.
+    const run = async (): Promise<string> => {
+      try {
+        for await (const piece of transport.chatStream!(messages, chatOpts)) channel.push(piece)
+        channel.close()
+      } catch (err) {
+        channel.close(err)
+      }
+      return ''
+    }
+    void enqueue(run, priority)
+    return channel.iterable
   }
 
-  return { classify, chat, chatMessages, enqueue }
+  return { chat, chatMessages, chatMessagesStream, enqueue }
 }
 
 export type LlmQueue = ReturnType<typeof createLlmQueue>
-
-/** Coerce a possibly-stringified boolean field from model JSON. */
-export function boolField(parsed: Record<string, unknown>, key: string): boolean {
-  return parsed[key] === true || String(parsed[key]).toLowerCase() === 'true'
-}

@@ -1,7 +1,7 @@
 {
   "name": "llm-queue",
   "version": "0.2.0",
-  "description": "Single-worker priority queue + JSON classify() helper for a local LLM (Ollama / llama.cpp), with browser/Node/service transports and an optional shared HTTP service.",
+  "description": "Single-worker priority queue for a local LLM (Ollama), with browser/Node/service transports and an OpenAI-compatible shared HTTP service.",
   "type": "module",
   "license": "UNLICENSED",
   "bin": {
@@ -16,17 +16,9 @@
       "types": "./dist/browser.d.ts",
       "import": "./dist/browser.js"
     },
-    "./client": {
-      "types": "./dist/client.d.ts",
-      "import": "./dist/client.js"
-    },
     "./server": {
       "types": "./dist/server.d.ts",
       "import": "./dist/server.js"
-    },
-    "./node": {
-      "types": "./dist/node.d.ts",
-      "import": "./dist/node.js"
     }
   },
   "files": [
@@ -39,20 +31,8 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
-  "dependencies": {
-    "jsonrepair": "^3.13.1"
-  },
-  "peerDependencies": {
-    "ollama": "^0.6.3"
-  },
-  "peerDependenciesMeta": {
-    "ollama": {
-      "optional": true
-    }
-  },
   "devDependencies": {
     "@types/node": "^22.10.0",
-    "ollama": "^0.6.3",
     "tsup": "^8.5.0",
     "typescript": "^5.9.2",
     "vitest": "^3.2.4"
