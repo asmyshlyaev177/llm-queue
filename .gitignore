@@ -1,6 +1,10 @@
 node_modules
 dist
+coverage
 *.log
 .DS_Store
 *.tsbuildinfo
 .pnpm-store
+
+.claude/settings.json
+.claude/settings.local.json

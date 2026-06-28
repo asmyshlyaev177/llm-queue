@@ -1,9 +1,32 @@
 {
   "name": "llm-queue",
   "version": "0.2.0",
-  "description": "Single-worker priority queue for a local LLM (Ollama), with browser/Node/service transports and an OpenAI-compatible shared HTTP service.",
+  "description": "Single-worker priority queue for a local LLM (Ollama), exposed as an OpenAI-compatible HTTP service so multiple processes share one serialized queue against one model.",
   "type": "module",
-  "license": "UNLICENSED",
+  "license": "MIT",
+  "author": "asmyshlyaev177 <asmyshlyaev177@gmail.com>",
+  "homepage": "https://github.com/asmyshlyaev177/llm-queue",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/asmyshlyaev177/llm-queue.git"
+  },
+  "bugs": {
+    "url": "https://github.com/asmyshlyaev177/llm-queue/issues"
+  },
+  "keywords": [
+    "llm",
+    "ollama",
+    "queue",
+    "priority-queue",
+    "openai",
+    "openai-compatible",
+    "local-llm",
+    "streaming",
+    "sse",
+    "ai",
+    "inference",
+    "self-hosted"
+  ],
   "bin": {
     "llm-queue": "./dist/cli.js"
   },
@@ -22,17 +45,28 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md",
+    "LICENSE"
   ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
     "serve": "node dist/cli.js serve",
+    "lint": "oxlint src",
+    "lint:fix": "oxlint --fix src",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
+    "prepare": "tsup"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "@vitest/coverage-v8": "^3.2.4",
+    "oxlint": "^1.0.0",
     "tsup": "^8.5.0",
     "typescript": "^5.9.2",
     "vitest": "^3.2.4"

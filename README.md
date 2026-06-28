@@ -1,8 +1,28 @@
 # llm-queue
 
+> One local model, one serialized queue. Run `llm-queue serve` and every process
+> — a cron job, a browser extension, an OpenAI client — funnels through a single
+> **priority queue** over an **OpenAI-compatible HTTP API**, so the model is never
+> hit concurrently and the runner never thrashes.
+
+[![npm](https://img.shields.io/npm/v/llm-queue.svg)](https://www.npmjs.com/package/llm-queue)
+[![CI](https://github.com/asmyshlyaev177/llm-queue/actions/workflows/test.yml/badge.svg)](https://github.com/asmyshlyaev177/llm-queue/actions/workflows/test.yml)
+[![node](https://img.shields.io/node/v/llm-queue.svg)](https://www.npmjs.com/package/llm-queue)
+[![license](https://img.shields.io/github/license/asmyshlyaev177/llm-queue.svg?style=flat-square)](./LICENSE)
+
 A single-worker priority queue for a **local LLM** (Ollama), exposed as an
 **OpenAI-compatible HTTP service** so multiple processes share one serialized
 queue against one model.
+
+## Install
+
+```bash
+npm i -g llm-queue   # the `llm-queue serve` CLI
+# or embed the queue/server in your own Node app:
+npm i llm-queue
+```
+
+Needs Node ≥ 20 and a running [Ollama](https://ollama.com).
 
 ## Why a service?
 
@@ -151,6 +171,17 @@ subpaths above are the building blocks the CLI itself is made of.
 ## Develop
 
 ```bash
-pnpm install && pnpm build   # tsup → dist (ESM + d.ts)
+pnpm install                 # builds dist via the prepare hook (tsup)
+pnpm typecheck               # tsc --noEmit
+pnpm lint                    # oxlint
 pnpm test                    # vitest (core queue + service)
+pnpm build                   # tsup → dist (ESM + d.ts)
 ```
+
+Commits follow [Conventional Commits](https://www.conventionalcommits.org/)
+(`feat:`, `fix:`, …) — release-please uses them to version, generate the
+changelog, and publish to npm on merge to `master`.
+
+## License
+
+[MIT](./LICENSE) © asmyshlyaev177
