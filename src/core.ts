@@ -35,7 +35,6 @@ export interface ChatOptions {
 /**
  * A chat transport hits the model once and returns the raw text response.
  * Implementations live in ./browser (fetch) and ./node (ollama pkg).
-
  * `numCtx` optionally overrides the transport's configured context window for
  * this one call. The service uses it to keep every client on a single shared
  * context size (the high-water max) so the local model never reloads.
