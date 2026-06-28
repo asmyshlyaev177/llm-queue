@@ -85,6 +85,41 @@ const out = await queue.classify('isRemote', SYSTEM_PROMPT, userText, (p) => ({
 (`jsonrepair`), retries with a timeout, and maps the parsed object via your
 builder. Returns `null` on a non-fatal failure; throws only on fatal model errors.
 
+## Priority — two clients, one queue
+
+When several clients share the queue, `priority` lets a latency-sensitive one
+jump ahead of a background one's backlog. A priority request slots in front of
+any *waiting* normal requests — but never preempts the one already running.
+
+```ts
+import { createLlmQueue } from 'llm-queue/core'
+import { createServiceTransport } from 'llm-queue/client'
+
+const url = 'http://localhost:11500'
+
+// Client A — a background batch job. Normal priority; fills the queue.
+const batch = createLlmQueue(createServiceTransport({ url }))
+for (const row of rows) void batch.chat(SYSTEM, row.text) // hundreds queued
+
+// Client B — serves a user action. priority: true jumps A's backlog.
+const interactive = createLlmQueue(createServiceTransport({ url, priority: true }))
+const answer = await interactive.chat(SYSTEM, userQuestion) // runs next
+```
+
+Both processes funnel through the single `llm-queue serve` queue, so B's request
+runs as soon as A's in-flight call finishes — ahead of A's remaining backlog.
+
+An OpenAI client can't put `priority` in the body, so it sends the
+`x-llmq-priority: 1` header instead (`createServiceTransport`'s `priority` does
+this for you):
+
+```ts
+await client.chat.completions.create(
+  { model: 'granite4.1:8b', messages: [{ role: 'user', content: userQuestion }] },
+  { headers: { 'x-llmq-priority': '1' } },
+)
+```
+
 ## Exports
 
 | Subpath | What | Where |
